@@ -3,67 +3,9 @@
 univaruints is a serialization of integer list
 Copyright © 2009-2013, Muayyad Alsadi <alsadi@ojuba.org>
 
-univaruints is a serialization of integer list
-based on idea from http://code.google.com/apis/protocolbuffers/docs/encoding.html
-and from UTF-8 variable length encoding of Unicode
 
-but unlike protocolbuffers it preserve order by saving most significant first
-
-in this implementation a single univaruint can be something like
-
-0xxx-xxxx
-10xx-xxxx xxxx-xxxx
-110x-xxxx xxxx-xxxx xxxx-xxxx 
-
-the most significant bits till the first zero indicates the number of extra bytes
-
-0xxx-xxxx is 0-127
-
-10xx-xxxx xxxx-xxxx  is 128-16511 (as 0b1000-0000-0000-0000 => 128 and 0b1011-1111-1111-1111 => 16511)
-
-110x-xxxx xxxx-xxxx xxxx-xxxx is 16512-2113663 
-
-and so on
-
-use it like this
-
-s=univaruints.encode([150,5,7])
-a=univaruints.decode(s)
-
-there are versions for single integer or for mor compact encoding of incremental lists
 
 this implementation is unit-tested (by running this module)
-
-this implementation uses precalculated lookup-table
-
-template boundary i shift
-0xxx-xxxx <=127   0 0
-10xx-xxxx <=191   1 128
-110x-xxxx <=223   2 16512
-1110-xxxx <=239   3
-1111-0xxx <=247   4
-1111-10xx <=251   5
-1111-110x <=253   6
-1111-1110 <=254   7
-1111-1111 ==255   8
-
-it was constructed using
-
-boundary = (0b11111111101111111>>i) & 255
-mask = 127>>i
-
-the shifts sequence was generated using this code
-
-shifts=[0]
-s=[]
-last=0
-for i in range(9):
-  boundary = (0b11111111101111111>>i) & 255
-  for j in range(last, boundary+1):
-    s.append(i) # on production it should be ord(i)
-  last=j+1
-  mask = 127>>i
-  shifts.append(shifts[-1]+ 1 + (mask<<(8*i)) + ((1<<(8*i))-1) )
 """
 
 import struct, bisect
@@ -71,6 +13,74 @@ int64=struct.Struct('>Q')
 shifts=[0, 128, 16512, 2113664, 270549120, 34630287488, 4432676798592, 567382630219904, 72624976668147840]
 shifts2=shifts[2:]
 n_by_chr='\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01\x02\x02\x02\x02\x02\x02\x02\x02\x02\x02\x02\x02\x02\x02\x02\x02\x02\x02\x02\x02\x02\x02\x02\x02\x02\x02\x02\x02\x02\x02\x02\x02\x03\x03\x03\x03\x03\x03\x03\x03\x03\x03\x03\x03\x03\x03\x03\x03\x04\x04\x04\x04\x04\x04\x04\x04\x05\x05\x05\x05\x06\x06\x07\x08'
+
+def write(f, s, max_items=0, incremental=0, unique=0, last_item=0):
+  """
+  encode the sequence s and write the string into the file-like object f
+
+  only max_items are encoded (0 mean infinity)
+  if incremental is set to True then the sequence is assumed to be incremental
+  which would result in more compact output
+  if you know that the sequence is strictly increasing then set unique=1
+  """
+  # NOTE: below some lookups before loop for optimizations
+  fwrite=f.write
+  rbisect=bisect.bisect_right
+  int64pack=int64.pack
+  char=chr
+
+  count=0
+  last_item-=unique
+  for item in s:
+    if max_items and count>=max_items: break
+    count+=1
+    v=item
+    if incremental:
+      if item<last_item+unique: raise ValueError
+      v-=last_item+unique
+    if v<128:
+      fwrite(char(v))
+    else:
+      n=rbisect(shifts2, v)+1
+      offset=shifts[n]
+      v-=offset
+      fwrite(char(((0b1111111100000000>>n) & 255) | ( (127>>n) & (v>>(n<<3)) ))+int64pack(v)[8-n:])
+    last_item=item
+  return count
+
+def read(f, max_items=0, incremental=0, unique=0, last_item=0):
+  """
+  read and decode sequence at most max_items from the file-like object
+
+  parameters are just like write
+  """
+  # NOTE: below some lookups before loop for optimizations
+  fread=f.read
+  int64unpack=int64.unpack
+  chr2int=ord
+
+  count=0
+  last_item-=unique
+
+  while True:
+    if max_items and count>=max_items: break
+    ch=fread(1)
+    if not ch: break
+    count+=1
+    o=chr2int(ch)
+    if o<128:
+      v=o
+    else:
+      n_ch=n_by_chr[o]
+      n=chr2int(n_ch)
+      mask=127>>n
+      payload=fread(n)
+      if len(payload)<n: raise IOError
+      v=shifts[n] + (((o & mask)<< (n<<3)) | ( (int64unpack(('\0'*(8-n))+payload))[0] ))
+    if incremental: v+=last_item+unique
+    yield v
+    last_item=v
+
 
 def decode_single(s):
   """
@@ -151,17 +161,33 @@ def incremental_encode(a, unique=1, last=0):
 def incremental_decode(s, unique=1, last=0):
   return incremental_decode_list(decode(s), unique, last)
 
+#import unittest
+#class TestSequenceFunctions(unittest.TestCase):
+#    def setUp(self):
+#        self.seq = range(10)
+#    def test_t1(self):
+#        self.assertEqual(x, y)
+#        self.assertRaises(TypeError, random.shuffle, (1,2,3))
+#        self.assertTrue(element in self.seq)
+# in main run unittest.main()
+
 if __name__ == "__main__":
   import time, itertools, random
+  from cStringIO import StringIO
   boundary=[(i-1,i,i+1) for i in shifts[1:]]
   boundary=list(itertools.chain(*boundary))
   boundary.insert(0,0)
   print "simple unit tests..."
-  for i in [0,1,100,200,300,500,1000,10000]:
+  l1=[0,1,100,200,300,500,1000,10000]
+  for i in l1:
     print 'before dec:', i, ', hex:', hex(i), ', bin:', bin(i)
     e=encode_single(i)
     print 'after len:',len(e), ', str:', repr(e)
     assert i == decode_single(encode_single(i))[1]
+  f=StringIO()
+  write(f, l1)
+  f.seek(0)
+  assert l1==list(read(f))
   print "boundary unit tests..."
   for i in boundary:
     print 'before dec:', i, ', hex:', hex(i), ', bin:', bin(i)
@@ -171,6 +197,21 @@ if __name__ == "__main__":
   assert boundary == list(decode(encode(boundary)))
   assert boundary == list(incremental_decode(incremental_encode(boundary, unique=0), unique=0))
   assert boundary == list(incremental_decode(incremental_encode(boundary, unique=1), unique=1))
+  
+  f=StringIO()
+  write(f, boundary, 0, 0, 0)
+  f.seek(0)
+  assert boundary == list(read(f, 0, 0, 0))
+  f=StringIO()
+  write(f, boundary, 0, 1, 0)
+  f.seek(0)
+  assert boundary == list(read(f, 0, 1, 0))
+  f=StringIO()
+  write(f, boundary, 0, 1, 1)
+  f.seek(0)
+  assert boundary == list(read(f, 0, 1, 1))
+
+
   print "random unit tests..."
   l=[random.randint(0, 5000000) for i in range(1000)]
   s=encode(l)
@@ -200,12 +241,24 @@ if __name__ == "__main__":
       for i in range(0,len(s),8):
           yield q.unpack(s[i:i+8])[0]
   t1=time.time()
-  for i in range(1000): unpack(pack(boundary))
+  for i in range(1000): list(unpack(pack(boundary)))
   t2=time.time()
   delta_pack=t2-t1
   print 'struct-based done in ', delta_pack
+
+  f=StringIO()
   t1=time.time()
-  for i in range(1000): decode(encode(boundary))
+  for i in range(1000):
+    f.seek(0)
+    write(f, boundary)
+    f.seek(0)
+    list(read(f))
+  t2=time.time()
+  print 'file-like done in ', t2-t1
+
+
+  t1=time.time()
+  for i in range(1000): list(decode(encode(boundary)))
   t2=time.time()
   delta_our=t2-t1
   print 'we are done in ', delta_our
@@ -216,7 +269,7 @@ if __name__ == "__main__":
   print 'we are done in encoding in ', delta_our
   e=encode(boundary)
   t1=time.time()
-  for i in range(1000): decode(e)
+  for i in range(1000): list(decode(e))
   t2=time.time()
   delta_our=t2-t1
   print 'we are done in decoding in ', delta_our
