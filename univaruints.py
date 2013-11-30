@@ -138,7 +138,6 @@ def encode_single(v):
     n=bisect_right7(shifts2, v)+1 #bisect.bisect_right(shifts2, v)+1
     offset=shifts[n]
     v-=offset
-    print n,v
     return chr(((0b1111111100000000>>n) & 255) | ( (127>>n) & (v>>(n<<3)) )) + int64.pack(v)[8-n:]
 
 def encode_single_alt(v):
